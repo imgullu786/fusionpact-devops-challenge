@@ -66,9 +66,18 @@ jobs:
     name: Deploy to EC2
     needs: build-and-push
     runs-on: ubuntu-latest
+    env:
+      REMOTE_APP_DIR: ${{ secrets.REMOTE_APP_DIR }}
     steps:
       - name: Checkout (for docker-compose.yml)
         uses: actions/checkout@v4
+
+      - name: Debug workspace before scp
+        run: |
+          echo "PWD: $(pwd)"
+          ls -la
+          ls -la backend || true
+          test -f docker-compose.yml && echo "FOUND: docker-compose.yml" || echo "MISSING: docker-compose.yml"
 
       - name: Install SSH client
         run: sudo apt-get update && sudo apt-get install -y openssh-client
@@ -78,25 +87,26 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}
 
+      - name: Ensure remote directory exists
+        run: ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "mkdir -p ${REMOTE_APP_DIR}"
+
       - name: Copy docker-compose.yml to remote
-        run: |
-          scp -o StrictHostKeyChecking=no docker-compose.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.REMOTE_APP_DIR }}/docker-compose.yml
+        run: scp -o StrictHostKeyChecking=no docker-compose.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${REMOTE_APP_DIR}/docker-compose.yml
 
       - name: Trigger remote docker-compose pull & up
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          REMOTE_APP_DIR: ${{ secrets.REMOTE_APP_DIR }}
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'EOF'
+          ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} <<'EOF'
             set -e
-            cd $REMOTE_APP_DIR
-            # Pull latest images
-            docker pull $DOCKERHUB_USERNAME/fusionpact-backend:latest || true
-            docker pull $DOCKERHUB_USERNAME/fusionpact-frontend:latest || true
-            # Start or update services
-            docker-compose up -d --remove-orphans
-            # Optional: health-check (curl your endpoint)
+            cd ${REMOTE_APP_DIR}
+            if command -v docker-compose >/dev/null 2>&1; then
+              COMPOSE_CMD="docker-compose"
+            else
+              COMPOSE_CMD="docker compose"
+            fi
+            $COMPOSE_CMD pull || true
+            $COMPOSE_CMD up -d --remove-orphans
             sleep 3
-            echo "Deployed. Containers:"
             docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
           EOF
