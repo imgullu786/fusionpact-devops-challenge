@@ -7,9 +7,6 @@ scrape_configs:
     static_configs:
       - targets: ['backend:8000']   # scrape FastAPI /metrics
 
-  - job_name: 'cadvisor'
-    static_configs:
-      - targets: ['cadvisor:8080']
 
   # (optional) scrape prometheus itself
   - job_name: 'prometheus'
