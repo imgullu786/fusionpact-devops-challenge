@@ -124,7 +124,11 @@ jobs:
 
       - name: Ensure remote directory exists
         run: ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "mkdir -p ${REMOTE_APP_DIR}"
-
+      
+      - name: Set correct ownership on remote directory
+    run: |
+      ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "sudo chown -R ${{ secrets.DEPLOY_USER }}:${{ secrets.DEPLOY_USER }} ${{ env.REMOTE_APP_DIR }}"
+      
       - name: Copy rendered docker-compose.yml to remote
         run: scp -o StrictHostKeyChecking=no docker-compose.scp.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${REMOTE_APP_DIR}/docker-compose.yml
 
