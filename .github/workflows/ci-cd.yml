@@ -128,6 +128,9 @@ jobs:
       - name: Copy rendered docker-compose.yml to remote
         run: scp -o StrictHostKeyChecking=no docker-compose.scp.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${REMOTE_APP_DIR}/docker-compose.yml
 
+      - name: Copy monitoring configuration folder
+        run: scp -r -o StrictHostKeyChecking=no monitoring ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ env.REMOTE_APP_DIR }}/
+
       - name: Trigger remote docker-compose pull & up
         env:
           # This env block is for the runner, but we use it below
