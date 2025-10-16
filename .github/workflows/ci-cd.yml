@@ -72,9 +72,17 @@ jobs:
 
       - name: Render docker-compose from template
         run: |
-          # This assumes docker-compose.yml.template exists at the root
-          # The complex if/else is removed for simplicity.
-          envsubst '${BACKEND_IMAGE} ${FRONTEND_IMAGE}' < docker-compose.yml.template > docker-compose.rendered.yml
+          if [ -f docker-compose.yml.template ]; then
+            echo "Found docker-compose.yml.template, using it as the source."
+            SOURCE_FILE="docker-compose.yml.template"
+          elif [ -f docker-compose.yml ]; then
+            echo "Found docker-compose.yml, using it as the source."
+            SOURCE_FILE="docker-compose.yml"
+          else
+            echo "ERROR: Neither docker-compose.yml.template nor docker-compose.yml was found." >&2
+            exit 1
+          fi
+          envsubst '${BACKEND_IMAGE} ${FRONTEND_IMAGE}' < "$SOURCE_FILE" > docker-compose.rendered.yml
         env:
           BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
           FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend_image }}
@@ -123,3 +131,4 @@ jobs:
             echo "Running containers:"
             docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
           EOF
+
