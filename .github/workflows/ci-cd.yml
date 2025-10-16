@@ -122,55 +122,27 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}
 
-      - name: Determine remote path (fallback and debug)
-  id: remote_path
-  run: |
-    REMOTE_APP_DIR="${{ secrets.REMOTE_APP_DIR }}"
-    : "${REMOTE_APP_DIR:=/home/ubuntu/fusionpact-devops-challenge}"
-    echo "remote=${REMOTE_APP_DIR}" >> "$GITHUB_OUTPUT"
+      - name: Ensure remote directory exists
+        run: ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "mkdir -p ${REMOTE_APP_DIR}"
 
-- name: Ensure remote directory exists
-  run: ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "mkdir -p ${{ steps.remote_path.outputs.remote }}"
+      - name: Copy rendered docker-compose.yml to remote
+        run: scp -o StrictHostKeyChecking=no docker-compose.scp.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${REMOTE_APP_DIR}/docker-compose.yml
 
-- name: Copy rendered docker-compose.yml to remote
-  run: scp -o StrictHostKeyChecking=no docker-compose.scp.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ steps.remote_path.outputs.remote }}/docker-compose.yml
-
-- name: Remote docker-compose pull & up (explicit file)
-  run: |
-    REMOTE="${{ steps.remote_path.outputs.remote }}"
-    ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} <<EOF
-      set -e
-      FILE=${REMOTE}/docker-compose.yml
-      echo "Using compose file: \$FILE"
-      if command -v docker-compose >/dev/null 2>&1; then
-        docker-compose -f "\$FILE" pull || true
-        docker-compose -f "\$FILE" up -d --remove-orphans
-      else
-        docker compose -f "\$FILE" pull || true
-        docker compose -f "\$FILE" up -d --remove-orphans
-      fi
-      docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
-EOF
-Key point: REMOTE is set locally (on the runner) and the heredoc receives the fully-resolved path as literal FILE=/home/ubuntu/…/docker-compose.yml. That prevents the remote shell from seeing an empty REMOTE_APP_DIR.
-
-Option B — pass the path via environment variable in the ssh command
-This sets an environment variable in the remote command invocation so it exists inside the remote session:
-
-yaml
-Copy code
-- name: Remote docker-compose pull & up (via remote env)
-  run: |
-    REMOTE="${{ steps.remote_path.outputs.remote }}"
-    ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} REMOTE_APP_DIR="${REMOTE}" bash -s <<'REMOTE_SCRIPT'
-      set -e
-      FILE="${REMOTE_APP_DIR}/docker-compose.yml"
-      echo "Using compose file: $FILE"
-      if command -v docker-compose >/dev/null 2>&1; then
-        docker-compose -f "$FILE" pull || true
-        docker-compose -f "$FILE" up -d --remove-orphans
-      else
-        docker compose -f "$FILE" pull || true
-        docker compose -f "$FILE" up -d --remove-orphans
-      fi
-      docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
-REMOTE_SCRIPT
+      - name: Trigger remote docker-compose pull & up (explicit file)
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} <<'EOF'
+            set -e
+            FILE=${REMOTE_APP_DIR}/docker-compose.yml
+            echo "Using compose file: $FILE"
+            if command -v docker-compose >/dev/null 2>&1; then
+              docker-compose -f "$FILE" pull || true
+              docker-compose -f "$FILE" up -d --remove-orphans
+            else
+              docker compose -f "$FILE" pull || true
+              docker compose -f "$FILE" up -d --remove-orphans
+            fi
+            sleep 3
+            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
+          EOF
