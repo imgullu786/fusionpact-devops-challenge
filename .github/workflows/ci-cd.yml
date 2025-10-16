@@ -151,8 +151,14 @@ jobs:
             mv docker-compose.scp.yml docker-compose.yml
             
             echo "Starting services from docker-compose.yml..."
-            \docker-compose pull
-            \docker-compose up -d --remove-orphans
+            if command -v docker-compose >/dev/null 2>&1; then
+              COMPOSE_CMD="docker-compose"
+            else
+              COMPOSE_CMD="docker compose"
+            fi
+            
+            \$COMPOSE_CMD pull
+            \$COMPOSE_CMD up -d --remove-orphans
             
             sleep 3
             echo "Running containers:"
