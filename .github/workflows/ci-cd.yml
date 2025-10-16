@@ -13,8 +13,8 @@ jobs:
     name: Build & Push Docker Images
     runs-on: ubuntu-latest
     outputs:
-      backend_image: ${{ steps.backend_tag.outputs.image }}
-      frontend_image: ${{ steps.frontend_tag.outputs.image }}
+      backend_image: ${{ steps.set_outputs.outputs.backend_image }}
+      frontend_image: ${{ steps.set_outputs.outputs.frontend_image }}
 
     steps:
       - name: Checkout
@@ -43,10 +43,6 @@ jobs:
             ${{ env.IMAGE_PREFIX }}-backend:latest
             ${{ env.IMAGE_PREFIX }}-backend:${{ github.sha }}
 
-      - name: Expose backend image tag
-        id: backend_tag
-        run: echo "::set-output name=image::${{ env.IMAGE_PREFIX }}-backend:${{ github.sha }}"
-
       - name: Build & push frontend image
         id: frontend_build
         uses: docker/build-push-action@v4
@@ -58,9 +54,14 @@ jobs:
             ${{ env.IMAGE_PREFIX }}-frontend:latest
             ${{ env.IMAGE_PREFIX }}-frontend:${{ github.sha }}
 
-      - name: Expose frontend image tag
-        id: frontend_tag
-        run: echo "::set-output name=image::${{ env.IMAGE_PREFIX }}-frontend:${{ github.sha }}"
+      - name: Set job outputs (backend_image & frontend_image)
+        id: set_outputs
+        run: |
+          echo "backend_image=${IMAGE_PREFIX}-backend:${GITHUB_SHA}" >> $GITHUB_OUTPUT
+          echo "frontend_image=${IMAGE_PREFIX}-frontend:${GITHUB_SHA}" >> $GITHUB_OUTPUT
+        env:
+          IMAGE_PREFIX: ${{ env.IMAGE_PREFIX }}
+          GITHUB_SHA: ${{ github.sha }}
 
   deploy:
     name: Deploy to EC2
@@ -70,17 +71,41 @@ jobs:
       - name: Checkout (for docker-compose.yml)
         uses: actions/checkout@v4
 
-      - name: Install SSH client
-        run: sudo apt-get update && sudo apt-get install -y openssh-client
+      - name: Ensure ssh client & envsubst available
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-client gettext-base
+
+      - name: Quick SSH connectivity check (fail fast)
+        run: |
+          echo "Checking SSH connectivity to ${{ secrets.DEPLOY_HOST }}..."
+          ssh -o BatchMode=yes -o ConnectTimeout=7 -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} 'echo OK' 
+        # If this fails, action will fail here and not continue.
 
       - name: Start ssh-agent and add key
         uses: webfactory/ssh-agent@v0.9.1
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}
 
-      - name: Copy docker-compose.yml to remote
+      - name: Create compose with pinned images
+        id: render_compose
         run: |
-          scp -o StrictHostKeyChecking=no docker-compose.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.REMOTE_APP_DIR }}/docker-compose.yml
+          # Read outputs from previous job (backend & frontend image tags)
+          echo "Using backend image: $BACKEND_IMAGE"
+          echo "Using frontend image: $FRONTEND_IMAGE"
+
+          # Create a temporary compose file with envsubst substitution
+          envsubst < docker-compose.yml > docker-compose.scp.yml
+
+          # Show the top lines for debug
+          head -n 40 docker-compose.scp.yml
+        env:
+          BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
+          FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend_image }}
+
+      - name: Copy rendered docker-compose.yml to remote
+        run: |
+          scp -o StrictHostKeyChecking=no docker-compose.scp.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.REMOTE_APP_DIR }}/docker-compose.yml
 
       - name: Trigger remote docker-compose pull & up
         env:
@@ -90,12 +115,10 @@ jobs:
           ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'EOF'
             set -e
             cd $REMOTE_APP_DIR
-            # Pull latest images
-            docker pull $DOCKERHUB_USERNAME/fusionpact-backend:latest || true
-            docker pull $DOCKERHUB_USERNAME/fusionpact-frontend:latest || true
-            # Start or update services
+            # Pull the pinned images (the compose file references the pinned images)
+            docker-compose pull || true
             docker-compose up -d --remove-orphans
-            # Optional: health-check (curl your endpoint)
+            # Optional: simple HTTP health-check (adjust URL as needed)
             sleep 3
             echo "Deployed. Containers:"
             docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"

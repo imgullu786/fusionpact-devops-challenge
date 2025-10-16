@@ -1,47 +1,60 @@
 version: "3.8"
+
 services:
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: "${BACKEND_IMAGE:-gulamgaush/fusionpact-backend:latest}"
     container_name: fusionpact_backend
     restart: unless-stopped
-    volumes:
-      - backend_data:/app/app/data
+    environment:
+      - ENV=production
     ports:
-      - "8000:8000"    # public backend port
+      - "8000:8000"
+    volumes:
+      - backend_logs:/var/log/fusionpact
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fS http://localhost:8000/health || curl -fS http://localhost:8000/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     networks:
-      - fusionnet
+      - fp-net
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    image: "${FRONTEND_IMAGE:-gulamgaush/fusionpact-frontend:latest}"
     container_name: fusionpact_frontend
     restart: unless-stopped
     ports:
-      - "80:80"        # public frontend port
+      - "80:80"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fS http://localhost/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     networks:
-      - fusionnet
+      - fp-net
 
   prometheus:
     image: prom/prometheus:latest
-    container_name: fusionpact_prometheus
+    container_name: prometheus
+    restart: unless-stopped
     volumes:
-      - ./monitoring:/etc/prometheus:ro
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
+      - '--config.file=/etc/prometheus/prometheus.yml'
     ports:
       - "9090:9090"
     networks:
-      - fusionnet
+      - fp-net
 
   grafana:
     image: grafana/grafana:latest
-    container_name: fusionpact_grafana
+    container_name: grafana
+    restart: unless-stopped
+    user: "472"
     environment:
-      - GF_INSTALL_PLUGINS=grafana-piechart-panel,grafana-polystat-panel
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana_data:/var/lib/grafana
     ports:
@@ -49,14 +62,27 @@ services:
     depends_on:
       - prometheus
     networks:
-      - fusionnet
+      - fp-net
 
+  cadvisor:
+    image: google/cadvisor:latest
+    container_name: cadvisor
+    restart: unless-stopped
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "8080:8080"
+    networks:
+      - fp-net
 
 networks:
-  fusionnet:
+  fp-net:
     driver: bridge
 
 volumes:
-  backend_data:
+  backend_logs:
   prometheus_data:
   grafana_data:
