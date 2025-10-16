@@ -64,62 +64,61 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
 
   deploy:
-    name: Deploy to EC2
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout (for docker-compose.yml)
-        uses: actions/checkout@v4
+  name: Deploy to EC2
+  needs: build-and-push
+  runs-on: ubuntu-latest
+  env:
+    REMOTE_APP_DIR: ${{ secrets.REMOTE_APP_DIR }}
+    BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
+    FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend_image }}
+  steps:
+    - name: Checkout (for docker-compose.yml)
+      uses: actions/checkout@v4
 
-      - name: Ensure ssh client & envsubst available
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y openssh-client gettext-base
+    - name: Ensure ssh client & envsubst available
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y openssh-client gettext-base
 
-      - name: Quick SSH connectivity check (fail fast)
-        run: |
-          echo "Checking SSH connectivity to ${{ secrets.DEPLOY_HOST }}..."
-          ssh -o BatchMode=yes -o ConnectTimeout=7 -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} 'echo OK' 
-        # If this fails, action will fail here and not continue.
+    - name: Start ssh-agent and add key
+      uses: webfactory/ssh-agent@v0.9.1
+      with:
+        ssh-private-key: ${{ secrets.DEPLOY_KEY }}
 
-      - name: Start ssh-agent and add key
-        uses: webfactory/ssh-agent@v0.9.1
-        with:
-          ssh-private-key: ${{ secrets.DEPLOY_KEY }}
+    - name: Quick SSH connectivity check (fail fast)
+      run: ssh -o BatchMode=yes -o ConnectTimeout=7 -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} 'echo OK'
 
-      - name: Create compose with pinned images
-        id: render_compose
-        run: |
-          # Read outputs from previous job (backend & frontend image tags)
-          echo "Using backend image: $BACKEND_IMAGE"
-          echo "Using frontend image: $FRONTEND_IMAGE"
+    - name: Create compose with pinned images
+      id: render_compose
+      run: |
+        envsubst '${BACKEND_IMAGE} ${FRONTEND_IMAGE}' < docker-compose.yml > docker-compose.scp.yml
+        head -n 40 docker-compose.scp.yml
 
-          # Create a temporary compose file with envsubst substitution
-          envsubst < docker-compose.yml > docker-compose.scp.yml
+    - name: Ensure remote directory exists
+      run: ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "mkdir -p ${REMOTE_APP_DIR}"
 
-          # Show the top lines for debug
-          head -n 40 docker-compose.scp.yml
-        env:
-          BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
-          FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend_image }}
+    - name: Copy rendered docker-compose.yml to remote
+      run: scp -o StrictHostKeyChecking=no docker-compose.scp.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${REMOTE_APP_DIR}/docker-compose.yml
 
-      - name: Copy rendered docker-compose.yml to remote
-        run: |
-          scp -o StrictHostKeyChecking=no docker-compose.scp.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.REMOTE_APP_DIR }}/docker-compose.yml
+    - name: Trigger remote docker-compose pull & up
+      env:
+        DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      run: |
+        ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} <<'EOF'
+          set -e
+          cd ${REMOTE_APP_DIR}
 
-      - name: Trigger remote docker-compose pull & up
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          REMOTE_APP_DIR: ${{ secrets.REMOTE_APP_DIR }}
-        run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'EOF'
-            set -e
-            cd $REMOTE_APP_DIR
-            # Pull the pinned images (the compose file references the pinned images)
-            docker-compose pull || true
-            docker-compose up -d --remove-orphans
-            # Optional: simple HTTP health-check (adjust URL as needed)
-            sleep 3
-            echo "Deployed. Containers:"
-            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
-          EOF
+          if command -v docker-compose >/dev/null 2>&1; then
+            COMPOSE_CMD="docker-compose"
+          else
+            COMPOSE_CMD="docker compose"
+          fi
+
+          echo "Using compose command: $COMPOSE_CMD"
+          $COMPOSE_CMD pull || true
+          $COMPOSE_CMD up -d --remove-orphans
+
+          sleep 3
+          echo "Deployed. Containers:"
+          docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
+        EOF
