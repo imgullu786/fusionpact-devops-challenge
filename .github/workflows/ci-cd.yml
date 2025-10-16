@@ -15,6 +15,7 @@ jobs:
     outputs:
       backend_image: ${{ steps.backend_tag.outputs.backend_image }}
       frontend_image: ${{ steps.frontend_tag.outputs.frontend_image }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,6 +33,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build & push backend image
+        id: backend_build
         uses: docker/build-push-action@v4
         with:
           context: ./backend
@@ -43,9 +45,14 @@ jobs:
 
       - name: Expose backend image tag
         id: backend_tag
-        run: echo "backend_image=${{ env.IMAGE_PREFIX }}-backend:${{ github.sha }}" >> $GITHUB_OUTPUT
+        run: |
+          echo "backend_image=${{ env.IMAGE_PREFIX }}-backend:${{ github.sha }}" >> $GITHUB_OUTPUT
+        env:
+          IMAGE_PREFIX: ${{ env.IMAGE_PREFIX }}
+          GITHUB_SHA: ${{ github.sha }}
 
       - name: Build & push frontend image
+        id: frontend_build
         uses: docker/build-push-action@v4
         with:
           context: ./frontend
@@ -57,78 +64,97 @@ jobs:
 
       - name: Expose frontend image tag
         id: frontend_tag
-        run: echo "frontend_image=${{ env.IMAGE_PREFIX }}-frontend:${{ github.sha }}" >> $GITHUB_OUTPUT
+        run: |
+          echo "frontend_image=${{ env.IMAGE_PREFIX }}-frontend:${{ github.sha }}" >> $GITHUB_OUTPUT
+        env:
+          IMAGE_PREFIX: ${{ env.IMAGE_PREFIX }}
+          GITHUB_SHA: ${{ github.sha }}
 
   deploy:
     name: Deploy to EC2
     needs: build-and-push
     runs-on: ubuntu-latest
+    env:
+      REMOTE_APP_DIR: ${{ secrets.REMOTE_APP_DIR }}
+      BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
+      FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend_image }}
     steps:
-      - name: Checkout
+      - name: Checkout (for docker-compose template)
         uses: actions/checkout@v4
 
-      - name: Install envsubst
-        run: sudo apt-get update && sudo apt-get install -y gettext-base
-
-      - name: Render docker-compose from template
+      - name: Debug workspace before render
         run: |
+          echo "PWD: $(pwd)"
+          ls -la
+          ls -la backend || true
+          test -f docker-compose.yml && echo "FOUND: docker-compose.yml" || echo "MISSING: docker-compose.yml"
+          test -f docker-compose.yml.template && echo "FOUND: docker-compose.yml.template" || echo "MISSING: docker-compose.yml.template"
+
+      - name: Install SSH client & envsubst
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-client gettext-base
+
+      - name: Render compose (template) or use repo file
+        run: |
+          # prefer a template if present, else use repo docker-compose.yml
           if [ -f docker-compose.yml.template ]; then
-            echo "Found docker-compose.yml.template, using it as the source."
-            SOURCE_FILE="docker-compose.yml.template"
+            TEMPLATE=docker-compose.yml.template
+          elif [ -f backend/docker-compose.yml.template ]; then
+            TEMPLATE=backend/docker-compose.yml.template
           elif [ -f docker-compose.yml ]; then
-            echo "Found docker-compose.yml, using it as the source."
-            SOURCE_FILE="docker-compose.yml"
+            cp docker-compose.yml docker-compose.scp.yml
+            exit 0
+          elif [ -f backend/docker-compose.yml ]; then
+            cp backend/docker-compose.yml docker-compose.scp.yml
+            exit 0
           else
-            echo "ERROR: Neither docker-compose.yml.template nor docker-compose.yml was found." >&2
+            echo "No compose file or template found in repo" >&2
             exit 1
           fi
-          envsubst '${BACKEND_IMAGE} ${FRONTEND_IMAGE}' < "$SOURCE_FILE" > docker-compose.rendered.yml
-        env:
-          BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
-          FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend_image }}
-
-      - name: Package artifacts for deployment
-        run: tar -czf deploy_package.tar.gz monitoring docker-compose.rendered.yml
+          echo "Using template: $TEMPLATE"
+          envsubst '${BACKEND_IMAGE} ${FRONTEND_IMAGE}' < "$TEMPLATE" > docker-compose.scp.yml
+          echo "Rendered compose (top 40 lines):"
+          head -n 40 docker-compose.scp.yml
 
       - name: Start ssh-agent and add key
         uses: webfactory/ssh-agent@v0.9.1
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}
 
-      - name: Deploy to EC2 via SSH
+      - name: Ensure remote directory exists
+        run: ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "mkdir -p ${REMOTE_APP_DIR}"
+      
+      # 1. Bundle all files needed for deployment into a single tar archive
+      - name: Package artifacts
+        run: tar -czf deploy_package.tar.gz monitoring docker-compose.scp.yml
+
+      # 2. Copy the single archive file to the remote server
+      - name: Copy package to remote
+        run: scp -o StrictHostKeyChecking=no deploy_package.tar.gz ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ env.REMOTE_APP_DIR }}/
+
+      # 3. SSH in, unpack the archive, and then run docker-compose
+      - name: Unpack and Deploy on Remote
         env:
           REMOTE_APP_DIR: ${{ secrets.REMOTE_APP_DIR }}
         run: |
-          # Create remote directory
-          ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "mkdir -p ${{ env.REMOTE_APP_DIR }}"
-
-          # Copy the deployment package
-          scp -o StrictHostKeyChecking=no deploy_package.tar.gz ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ env.REMOTE_APP_DIR }}/
-
-          # Unpack, deploy, and clean up
-          ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} <<'EOF'
+          ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} <<EOF
             set -e
+            # Navigate to the app directory
             cd ${{ env.REMOTE_APP_DIR }}
             
             echo "Unpacking deployment package..."
+            # Unpack the archive. This will overwrite existing files.
             tar -xzf deploy_package.tar.gz
-            mv docker-compose.rendered.yml docker-compose.yml
             
-            echo "Starting services..."
-            if command -v docker-compose >/dev/null 2>&1; then
-              COMPOSE_CMD="docker-compose"
-            else
-              COMPOSE_CMD="docker compose"
-            fi
-
-            $COMPOSE_CMD pull
-            $COMPOSE_CMD up -d --remove-orphans
+            # Rename the compose file to the standard name
+            mv docker-compose.scp.yml docker-compose.yml
             
-            echo "Cleaning up package..."
-            rm deploy_package.tar.gz
-
+            echo "Starting services from docker-compose.yml..."
+            \docker-compose pull
+            \docker-compose up -d --remove-orphans
+            
             sleep 3
             echo "Running containers:"
             docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
           EOF
-
