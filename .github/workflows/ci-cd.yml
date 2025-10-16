@@ -66,57 +66,36 @@ jobs:
     name: Deploy to EC2
     needs: build-and-push
     runs-on: ubuntu-latest
-    env:
-      REMOTE_APP_DIR: ${{ secrets.REMOTE_APP_DIR }}
-      BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
-      FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend_image }}
     steps:
       - name: Checkout (for docker-compose.yml)
         uses: actions/checkout@v4
 
-      - name: Ensure ssh client & envsubst available
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y openssh-client gettext-base
+      - name: Install SSH client
+        run: sudo apt-get update && sudo apt-get install -y openssh-client
 
       - name: Start ssh-agent and add key
-        uses: webfactory/ssh-agent@v0.9.1
+        uses: webfactory/ssh-agent@v0.9x.1
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}
 
-      - name: Quick SSH connectivity check (fail fast)
-        run: ssh -o BatchMode=yes -o ConnectTimeout=7 -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} 'echo OK'
-
-      - name: Create compose with pinned images
-        id: render_compose
+      - name: Copy docker-compose.yml to remote
         run: |
-          envsubst '${BACKEND_IMAGE} ${FRONTEND_IMAGE}' < docker-compose.yml > docker-compose.scp.yml
-          head -n 40 docker-compose.scp.yml
-
-      - name: Ensure remote directory exists
-        run: ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "mkdir -p ${REMOTE_APP_DIR}"
-
-      - name: Copy rendered docker-compose.yml to remote
-        run: scp -o StrictHostKeyChecking=no docker-compose.scp.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${REMOTE_APP_DIR}/docker-compose.yml
+          scp -o StrictHostKeyChecking=no docker-compose.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.REMOTE_APP_DIR }}/docker-compose.yml
 
       - name: Trigger remote docker-compose pull & up
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          REMOTE_APP_DIR: ${{ secrets.REMOTE_APP_DIR }}
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} <<'EOF'
+          ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'EOF'
             set -e
-            cd ${REMOTE_APP_DIR}
-
-            if command -v docker-compose >/dev/null 2>&1; then
-              COMPOSE_CMD="docker-compose"
-            else
-              COMPOSE_CMD="docker compose"
-            fi
-
-            echo "Using compose command: $COMPOSE_CMD"
-            $COMPOSE_CMD pull || true
-            $COMPOSE_CMD up -d --remove-orphans
-
+            cd $REMOTE_APP_DIR
+            # Pull latest images
+            docker pull $DOCKERHUB_USERNAME/fusionpact-backend:latest || true
+            docker pull $DOCKERHUB_USERNAME/fusionpact-frontend:latest || true
+            # Start or update services
+            docker-compose up -d --remove-orphans
+            # Optional: health-check (curl your endpoint)
             sleep 3
             echo "Deployed. Containers:"
             docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
