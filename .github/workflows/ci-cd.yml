@@ -125,38 +125,38 @@ jobs:
       - name: Ensure remote directory exists
         run: ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "mkdir -p ${REMOTE_APP_DIR}"
       
-      - name: Set correct ownership on remote directory
-        run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "sudo chown -R ${{ secrets.DEPLOY_USER }}:${{ secrets.DEPLOY_USER }} ${{ env.REMOTE_APP_DIR }}"
-          
-      - name: Copy rendered docker-compose.yml to remote
-        run: scp -o StrictHostKeyChecking=no docker-compose.scp.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${REMOTE_APP_DIR}/docker-compose.yml
+      # 1. Bundle all files needed for deployment into a single tar archive
+      - name: Package artifacts
+        run: tar -czf deploy_package.tar.gz monitoring docker-compose.scp.yml
 
-      - name: Copy monitoring configuration folder
-        run: scp -r -o StrictHostKeyChecking=no monitoring ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ env.REMOTE_APP_DIR }}/
+      # 2. Copy the single archive file to the remote server
+      - name: Copy package to remote
+        run: scp -o StrictHostKeyChecking=no deploy_package.tar.gz ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ env.REMOTE_APP_DIR }}/
 
-      - name: Trigger remote docker-compose pull & up
+      # 3. SSH in, unpack the archive, and then run docker-compose
+      - name: Unpack and Deploy on Remote
         env:
-          # This env block is for the runner, but we use it below
           REMOTE_APP_DIR: ${{ secrets.REMOTE_APP_DIR }}
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} <<EOF
             set -e
-            # CD into the application directory.
-            # ${{ env.REMOTE_APP_DIR }} is expanded by the GitHub runner before the script is sent.
+            # Navigate to the app directory
             cd ${{ env.REMOTE_APP_DIR }}
             
-            echo "Working in directory: \$(pwd)"
-            echo "Using compose file: docker-compose.yml"
-
-            # Check for docker-compose vs docker compose
+            echo "Unpacking deployment package..."
+            # Unpack the archive. This will overwrite existing files.
+            tar -xzf deploy_package.tar.gz
+            
+            # Rename the compose file to the standard name
+            mv docker-compose.scp.yml docker-compose.yml
+            
+            echo "Starting services from docker-compose.yml..."
             if command -v docker-compose >/dev/null 2>&1; then
               COMPOSE_CMD="docker-compose"
             else
               COMPOSE_CMD="docker compose"
             fi
             
-            # Since we are in the correct directory, we don't need the -f flag
             \$COMPOSE_CMD pull
             \$COMPOSE_CMD up -d --remove-orphans
             
