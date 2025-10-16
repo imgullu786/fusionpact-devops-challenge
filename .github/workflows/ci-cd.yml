@@ -128,21 +128,32 @@ jobs:
       - name: Copy rendered docker-compose.yml to remote
         run: scp -o StrictHostKeyChecking=no docker-compose.scp.yml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${REMOTE_APP_DIR}/docker-compose.yml
 
-      - name: Trigger remote docker-compose pull & up (explicit file)
+      - name: Trigger remote docker-compose pull & up
         env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          # This env block is for the runner, but we use it below
+          REMOTE_APP_DIR: ${{ secrets.REMOTE_APP_DIR }}
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} <<'EOF'
+          ssh -o StrictHostKeyChecking=no ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} <<EOF
             set -e
-            FILE=${REMOTE_APP_DIR}/docker-compose.yml
-            echo "Using compose file: $FILE"
+            # CD into the application directory.
+            # ${{ env.REMOTE_APP_DIR }} is expanded by the GitHub runner before the script is sent.
+            cd ${{ env.REMOTE_APP_DIR }}
+            
+            echo "Working in directory: \$(pwd)"
+            echo "Using compose file: docker-compose.yml"
+
+            # Check for docker-compose vs docker compose
             if command -v docker-compose >/dev/null 2>&1; then
-              docker-compose -f "$FILE" pull || true
-              docker-compose -f "$FILE" up -d --remove-orphans
+              COMPOSE_CMD="docker-compose"
             else
-              docker compose -f "$FILE" pull || true
-              docker compose -f "$FILE" up -d --remove-orphans
+              COMPOSE_CMD="docker compose"
             fi
+            
+            # Since we are in the correct directory, we don't need the -f flag
+            \$COMPOSE_CMD pull
+            \$COMPOSE_CMD up -d --remove-orphans
+            
             sleep 3
+            echo "Running containers:"
             docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
           EOF
