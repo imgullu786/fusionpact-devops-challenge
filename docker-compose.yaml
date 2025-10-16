@@ -5,8 +5,6 @@ services:
     image: "${BACKEND_IMAGE:-gulamgaush/fusionpact-backend:latest}"
     container_name: fusionpact_backend
     restart: unless-stopped
-    environment:
-      - ENV=production
     ports:
       - "8000:8000"
     volumes:
