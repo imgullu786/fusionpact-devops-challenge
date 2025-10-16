@@ -36,8 +36,8 @@ jobs:
         id: backend_build
         uses: docker/build-push-action@v4
         with:
-          context: .
-          file: backend/Dockerfile
+          context: ./backend
+          file: Dockerfile
           push: true
           tags: |
             ${{ env.IMAGE_PREFIX }}-backend:latest
@@ -51,8 +51,8 @@ jobs:
         id: frontend_build
         uses: docker/build-push-action@v4
         with:
-          context: .
-          file: frontend/Dockerfile
+          context: ./frontend
+          file: Dockerfile
           push: true
           tags: |
             ${{ env.IMAGE_PREFIX }}-frontend:latest
